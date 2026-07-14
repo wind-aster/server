@@ -65,12 +65,18 @@ func WsHandler(w http.ResponseWriter, r *http.Request) {
 
 		// Парсим входящий JSON
 		var incoming struct {
-			ChatID int    `json:"chat_id"`
-			Text   string `json:"text"`
+			ChatID        int    `json:"chat_id"`
+			Text          string `json:"text"`
+			AttachmentIDs []int  `json:"attachment_ids"`
 		}
 
 		if err := json.Unmarshal(payload, &incoming); err != nil {
 			log.Printf("Не удалось распарсить JSON от юзера %d: %v", userID, err)
+			continue
+		}
+
+		// A message must carry text or at least one attachment.
+		if incoming.Text == "" && len(incoming.AttachmentIDs) == 0 {
 			continue
 		}
 
@@ -85,6 +91,9 @@ func WsHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// Link any uploaded attachments to this message before broadcasting.
+		finalizeAttachments(msgID, incoming.ChatID, userID, incoming.AttachmentIDs)
+
 		// Формируем полноценный объект сообщения для отправки
 		fullMessage := map[string]interface{}{
 			"id":         msgID,
@@ -92,6 +101,9 @@ func WsHandler(w http.ResponseWriter, r *http.Request) {
 			"chat_id":    incoming.ChatID,
 			"text":       incoming.Text,
 			"created_at": createdAt,
+		}
+		if att := loadAttachmentsByMessage(msgID); len(att) > 0 {
+			fullMessage["attachments"] = att
 		}
 
 		finalJSON, _ := json.Marshal(fullMessage)

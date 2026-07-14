@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/WindAster/server/internals/config"
 	"github.com/WindAster/server/internals/database"
@@ -37,6 +38,9 @@ func main() {
 	handlers.Store = store
 	handlers.MaxUploadSize = cfg.MaxUploadSize
 	handlers.MaxVideoSize = cfg.MaxVideoSize
+
+	// Periodically clean up abandoned (never-sent) uploads from DB + storage.
+	handlers.StartAttachmentCleanup(time.Hour, cfg.PendingAttachmentTTL)
 
 	fmt.Println("Бэкенд успешно запущен и ожидает логики!")
 

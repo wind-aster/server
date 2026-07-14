@@ -20,6 +20,8 @@ type Config struct {
 	MaxUploadSize   int64         // bytes, general files
 	MaxVideoSize    int64         // bytes, videos (larger cap)
 	UploadURLExpiry time.Duration // presigned URL lifetime
+
+	PendingAttachmentTTL time.Duration // abandoned pending uploads older than this are cleaned up
 }
 
 // Load reads configuration from environment variables (populated via godotenv
@@ -27,16 +29,17 @@ type Config struct {
 func Load() Config {
 	endpoint := getEnv("MINIO_ENDPOINT", "localhost:9000")
 	return Config{
-		DBDSN:               os.Getenv("DB_DSN"),
-		MinioEndpoint:       endpoint,
-		MinioPublicEndpoint: getEnv("MINIO_PUBLIC_ENDPOINT", endpoint),
-		MinioAccessKey:      os.Getenv("MINIO_ACCESS_KEY"),
-		MinioSecretKey:      os.Getenv("MINIO_SECRET_KEY"),
-		MinioBucket:         getEnv("MINIO_BUCKET", "windaster-files"),
-		MinioUseSSL:         getEnv("MINIO_USE_SSL", "false") == "true",
-		MaxUploadSize:       getInt64("MAX_UPLOAD_SIZE", 26214400), // 25 MiB
-		MaxVideoSize:        getInt64("MAX_VIDEO_SIZE", 52428800),  // 50 MiB
-		UploadURLExpiry:     time.Duration(getInt64("UPLOAD_URL_EXPIRY_SECONDS", 900)) * time.Second,
+		DBDSN:                os.Getenv("DB_DSN"),
+		MinioEndpoint:        endpoint,
+		MinioPublicEndpoint:  getEnv("MINIO_PUBLIC_ENDPOINT", endpoint),
+		MinioAccessKey:       os.Getenv("MINIO_ACCESS_KEY"),
+		MinioSecretKey:       os.Getenv("MINIO_SECRET_KEY"),
+		MinioBucket:          getEnv("MINIO_BUCKET", "windaster-files"),
+		MinioUseSSL:          getEnv("MINIO_USE_SSL", "false") == "true",
+		MaxUploadSize:        getInt64("MAX_UPLOAD_SIZE", 26214400), // 25 MiB
+		MaxVideoSize:         getInt64("MAX_VIDEO_SIZE", 52428800),  // 50 MiB
+		UploadURLExpiry:      time.Duration(getInt64("UPLOAD_URL_EXPIRY_SECONDS", 900)) * time.Second,
+		PendingAttachmentTTL: time.Duration(getInt64("PENDING_ATTACHMENT_TTL_HOURS", 24)) * time.Hour,
 	}
 }
 

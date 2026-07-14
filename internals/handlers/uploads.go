@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"path/filepath"
@@ -246,15 +247,26 @@ func loadAttachmentsByMessage(msgID int) []models.Attachment {
 	return m[msgID]
 }
 
-// loadAttachmentsByChat returns ready attachments for every message in a chat,
-// keyed by message id.
-func loadAttachmentsByChat(chatID int) map[int][]models.Attachment {
-	return loadAttachments("chat_id = $1", chatID)
+// loadAttachmentsByIDs returns ready attachments for the given message ids,
+// keyed by message id. Used by the paginated message handler so enrichment is
+// scoped to a single page rather than the whole chat.
+func loadAttachmentsByIDs(ids []int) map[int][]models.Attachment {
+	if len(ids) == 0 {
+		return map[int][]models.Attachment{}
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = id
+	}
+	where := "message_id IN (" + strings.Join(placeholders, ",") + ")"
+	return loadAttachments(where, args...)
 }
 
 // loadAttachments runs the shared query (filtered by the given WHERE fragment)
 // and builds a message_id -> attachments map with presigned URLs.
-func loadAttachments(where string, arg interface{}) map[int][]models.Attachment {
+func loadAttachments(where string, args ...interface{}) map[int][]models.Attachment {
 	result := make(map[int][]models.Attachment)
 	if Store == nil {
 		return result
@@ -263,7 +275,7 @@ func loadAttachments(where string, arg interface{}) map[int][]models.Attachment 
 		`SELECT id, message_id, filename, mime_type, size_bytes, width, height, storage_key, thumb_key
 		 FROM attachments
 		 WHERE `+where+` AND status = 'ready' AND message_id IS NOT NULL
-		 ORDER BY id ASC`, arg)
+		 ORDER BY id ASC`, args...)
 	if err != nil {
 		log.Printf("loadAttachments: query failed: %v", err)
 		return result

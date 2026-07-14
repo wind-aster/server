@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"strconv"
 
@@ -79,13 +80,26 @@ func GetMessagesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := `
-		SELECT id, sender_id, chat_id, text, created_at 
-		FROM messages 
-		WHERE chat_id = $1
-		ORDER BY created_at ASC`
+	// Keyset pagination: newest `limit` messages with id < `before` (cursor).
+	// Ordering by id (SERIAL, monotonic) avoids created_at ties.
+	limit := 50
+	if l, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && l > 0 {
+		if l > 100 {
+			l = 100
+		}
+		limit = l
+	}
+	before := int64(math.MaxInt64)
+	if b, err := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64); err == nil && b > 0 {
+		before = b
+	}
 
-	rows, err := database.DB.Query(query, chatID)
+	rows, err := database.DB.Query(`
+		SELECT id, sender_id, chat_id, text, created_at
+		FROM messages
+		WHERE chat_id = $1 AND id < $2
+		ORDER BY id DESC
+		LIMIT $3`, chatID, before, limit)
 	if err != nil {
 		http.Error(w, "Ошибка получения сообщений из базы: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -103,13 +117,22 @@ func GetMessagesHandler(w http.ResponseWriter, r *http.Request) {
 		chatHistory = append(chatHistory, msg)
 	}
 
+	// Query returns newest-first; reverse to ascending for display.
+	for i, j := 0, len(chatHistory)-1; i < j; i, j = i+1, j-1 {
+		chatHistory[i], chatHistory[j] = chatHistory[j], chatHistory[i]
+	}
+
 	// Чтобы фронтенд не ловил null, если переписка еще пустая, отдаем пустой массив []
 	if chatHistory == nil {
 		chatHistory = []models.Message{}
 	}
 
-	// Enrich with attachments (one query for the whole chat) and presigned URLs.
-	byMsg := loadAttachmentsByChat(chatID)
+	// Enrich only this page's messages with attachments + presigned URLs.
+	ids := make([]int, len(chatHistory))
+	for i := range chatHistory {
+		ids[i] = chatHistory[i].ID
+	}
+	byMsg := loadAttachmentsByIDs(ids)
 	for i := range chatHistory {
 		if att := byMsg[chatHistory[i].ID]; att != nil {
 			chatHistory[i].Attachments = att

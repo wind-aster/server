@@ -22,7 +22,23 @@ import (
 var (
 	Store         storage.Storage
 	MaxUploadSize int64
+	MaxVideoSize  int64
 )
+
+// limitFor returns the max allowed byte size for a given mime type. Videos get
+// their own (larger) cap; everything else uses the general upload limit.
+func limitFor(mime string) int64 {
+	if strings.HasPrefix(mime, "video/") {
+		return MaxVideoSize
+	}
+	return MaxUploadSize
+}
+
+// isInlineType reports whether an object should be served inline (viewed in the
+// browser) rather than as a download — images and videos.
+func isInlineType(mime string) bool {
+	return strings.HasPrefix(mime, "image/") || strings.HasPrefix(mime, "video/")
+}
 
 // isChatMember reports whether userID belongs to chatID.
 func isChatMember(chatID, userID int) bool {
@@ -60,16 +76,16 @@ func CreateUploadHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Поля chat_id и filename обязательны", http.StatusBadRequest)
 		return
 	}
-	if in.Size > MaxUploadSize {
+	if in.MimeType == "" {
+		in.MimeType = "application/octet-stream"
+	}
+	if in.Size > limitFor(in.MimeType) {
 		http.Error(w, "Файл превышает максимальный размер", http.StatusRequestEntityTooLarge)
 		return
 	}
 	if !isChatMember(in.ChatID, userID) {
 		http.Error(w, "Нет доступа к этому чату", http.StatusForbidden)
 		return
-	}
-	if in.MimeType == "" {
-		in.MimeType = "application/octet-stream"
 	}
 
 	storageKey := uuid.NewString() + strings.ToLower(filepath.Ext(in.Filename))
@@ -163,8 +179,7 @@ func GetFileHandler(w http.ResponseWriter, r *http.Request) {
 		a.Height = &hv
 	}
 	ctx := r.Context()
-	inline := strings.HasPrefix(mimeType, "image/")
-	if u, err := Store.PresignGet(ctx, storageKey, filename, inline); err == nil {
+	if u, err := Store.PresignGet(ctx, storageKey, filename, isInlineType(mimeType)); err == nil {
 		a.URL = u
 	}
 	if thumbKey.Valid && thumbKey.String != "" {
@@ -188,13 +203,14 @@ func finalizeAttachments(msgID, chatID, senderID int, ids []int) {
 	}
 	ctx := context.Background()
 	for _, id := range ids {
-		var storageKey, thumbKey string
+		var storageKey, mimeType string
+		var thumbKey string
 		var tk sql.NullString
 		err := database.DB.QueryRow(
-			`SELECT storage_key, thumb_key FROM attachments
+			`SELECT storage_key, thumb_key, mime_type FROM attachments
 			 WHERE id = $1 AND uploader_id = $2 AND chat_id = $3 AND status = 'pending'`,
 			id, senderID, chatID,
-		).Scan(&storageKey, &tk)
+		).Scan(&storageKey, &tk, &mimeType)
 		if err != nil {
 			continue // unknown / not owned / already finalized
 		}
@@ -205,7 +221,7 @@ func finalizeAttachments(msgID, chatID, senderID int, ids []int) {
 			log.Printf("finalize: object for attachment %d missing: %v", id, err)
 			continue
 		}
-		if size > MaxUploadSize {
+		if size > limitFor(mimeType) {
 			log.Printf("finalize: attachment %d oversize (%d), rejecting", id, size)
 			_ = Store.Delete(ctx, storageKey)
 			if thumbKey != "" {
@@ -277,8 +293,7 @@ func loadAttachments(where string, arg interface{}) map[int][]models.Attachment 
 			hv := int(height.Int64)
 			a.Height = &hv
 		}
-		inline := strings.HasPrefix(a.MimeType, "image/")
-		if u, err := Store.PresignGet(ctx, storageKey, a.Filename, inline); err == nil {
+		if u, err := Store.PresignGet(ctx, storageKey, a.Filename, isInlineType(a.MimeType)); err == nil {
 			a.URL = u
 		}
 		if thumbKey.Valid && thumbKey.String != "" {

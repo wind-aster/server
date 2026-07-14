@@ -36,6 +36,7 @@ func main() {
 	}
 	handlers.Store = store
 	handlers.MaxUploadSize = cfg.MaxUploadSize
+	handlers.MaxVideoSize = cfg.MaxVideoSize
 
 	fmt.Println("Бэкенд успешно запущен и ожидает логики!")
 

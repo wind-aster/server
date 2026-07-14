@@ -17,7 +17,8 @@ type Config struct {
 	MinioBucket         string
 	MinioUseSSL         bool
 
-	MaxUploadSize   int64         // bytes
+	MaxUploadSize   int64         // bytes, general files
+	MaxVideoSize    int64         // bytes, videos (larger cap)
 	UploadURLExpiry time.Duration // presigned URL lifetime
 }
 
@@ -34,6 +35,7 @@ func Load() Config {
 		MinioBucket:         getEnv("MINIO_BUCKET", "windaster-files"),
 		MinioUseSSL:         getEnv("MINIO_USE_SSL", "false") == "true",
 		MaxUploadSize:       getInt64("MAX_UPLOAD_SIZE", 26214400), // 25 MiB
+		MaxVideoSize:        getInt64("MAX_VIDEO_SIZE", 52428800),  // 50 MiB
 		UploadURLExpiry:     time.Duration(getInt64("UPLOAD_URL_EXPIRY_SECONDS", 900)) * time.Second,
 	}
 }

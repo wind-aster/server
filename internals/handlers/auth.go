@@ -94,7 +94,13 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := auth.GenerateToken(dbID)
+	accessToken, err := auth.GenerateAccessToken(dbID)
+	if err != nil {
+		http.Error(w, "Ошибка генерации токена", http.StatusInternalServerError)
+		return
+	}
+
+	refreshToken, err := issueRefreshToken(dbID, Cfg.RefreshTokenTTL)
 	if err != nil {
 		http.Error(w, "Ошибка генерации токена", http.StatusInternalServerError)
 		return
@@ -104,8 +110,9 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	response := map[string]interface{}{
-		"status": "success",
-		"token":  token,
+		"status":        "success",
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
 		"user": map[string]interface{}{
 			"id":       dbID,
 			"username": dbUsername,

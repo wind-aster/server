@@ -17,9 +17,25 @@ func StartAttachmentCleanup(interval, ttl time.Duration) {
 	go func() {
 		for {
 			runAttachmentCleanup(ttl)
+			runRefreshTokenCleanup()
 			time.Sleep(interval)
 		}
 	}()
+}
+
+// runRefreshTokenCleanup deletes refresh tokens that are past expiry or have
+// been revoked for over a week, so the table doesn't grow unbounded. Best-effort.
+func runRefreshTokenCleanup() {
+	res, err := database.DB.Exec(
+		`DELETE FROM refresh_tokens
+		 WHERE expires_at < now() OR revoked_at < now() - interval '7 days'`)
+	if err != nil {
+		log.Printf("cleanup: refresh token purge failed: %v", err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		log.Printf("cleanup: removed %d stale refresh token(s)", n)
+	}
 }
 
 func runAttachmentCleanup(ttl time.Duration) {

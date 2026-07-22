@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/WindAster/server/internals/auth"
 	"github.com/WindAster/server/internals/config"
 	"github.com/WindAster/server/internals/database"
 	"github.com/WindAster/server/internals/handlers"
@@ -27,6 +28,12 @@ func main() {
 		fmt.Println("Ошибка: DB_DSN не задан")
 		os.Exit(1)
 	}
+	if cfg.JWTSecret == "" {
+		log.Fatal("Ошибка: JWT_SECRET не задан")
+	}
+
+	auth.Configure(cfg.JWTSecret, cfg.AccessTokenTTL)
+	handlers.Cfg = cfg
 
 	database.InitDB(cfg.DBDSN)
 
@@ -54,6 +61,8 @@ func main() {
 
 	r.Post("/api/register", handlers.RegisterHandler)
 	r.Post("/api/login", handlers.LoginHandler)
+	r.Post("/api/refresh", handlers.RefreshHandler)
+	r.Post("/api/logout", handlers.LogoutHandler)
 
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.AuthMiddleware)

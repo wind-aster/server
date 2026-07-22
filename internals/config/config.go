@@ -22,6 +22,10 @@ type Config struct {
 	UploadURLExpiry time.Duration // presigned URL lifetime
 
 	PendingAttachmentTTL time.Duration // abandoned pending uploads older than this are cleaned up
+
+	JWTSecret       string        // HMAC secret for signing access tokens (required)
+	AccessTokenTTL  time.Duration // access token lifetime
+	RefreshTokenTTL time.Duration // refresh token lifetime
 }
 
 // Load reads configuration from environment variables (populated via godotenv
@@ -40,6 +44,9 @@ func Load() Config {
 		MaxVideoSize:         getInt64("MAX_VIDEO_SIZE", 52428800),  // 50 MiB
 		UploadURLExpiry:      time.Duration(getInt64("UPLOAD_URL_EXPIRY_SECONDS", 900)) * time.Second,
 		PendingAttachmentTTL: time.Duration(getInt64("PENDING_ATTACHMENT_TTL_HOURS", 24)) * time.Hour,
+		JWTSecret:            os.Getenv("JWT_SECRET"),
+		AccessTokenTTL:       time.Duration(getInt64("ACCESS_TOKEN_TTL_MINUTES", 15)) * time.Minute,
+		RefreshTokenTTL:      time.Duration(getInt64("REFRESH_TOKEN_TTL_DAYS", 30)) * 24 * time.Hour,
 	}
 }
 

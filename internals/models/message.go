@@ -12,6 +12,15 @@ type Message struct {
 	ReplyToID    *int          `json:"reply_to_id,omitempty"`
 	EditedAt     *time.Time    `json:"edited_at,omitempty"`
 	ReplyPreview *ReplyPreview `json:"reply_preview,omitempty"`
+	Reactions    []Reaction    `json:"reactions,omitempty"`
+}
+
+// Reaction is an emoji aggregated across all users who reacted with it on a
+// message. UserIDs lets each client derive whether the current user reacted.
+type Reaction struct {
+	Emoji   string `json:"emoji"`
+	Count   int    `json:"count"`
+	UserIDs []int  `json:"user_ids"`
 }
 
 // ReplyPreview is a lightweight quote of the message a reply points at, so the

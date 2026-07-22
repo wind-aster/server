@@ -150,12 +150,16 @@ func GetMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	byMsg := loadAttachmentsByIDs(ids)
 	previews := loadReplyPreviewsByIDs(replyIDs)
+	reactions := loadReactionsByIDs(ids)
 	for i := range chatHistory {
 		if att := byMsg[chatHistory[i].ID]; att != nil {
 			chatHistory[i].Attachments = att
 		}
 		if chatHistory[i].ReplyToID != nil {
 			chatHistory[i].ReplyPreview = previews[*chatHistory[i].ReplyToID]
+		}
+		if rx := reactions[chatHistory[i].ID]; rx != nil {
+			chatHistory[i].Reactions = rx
 		}
 	}
 
@@ -200,6 +204,8 @@ func createMessage(senderID, chatID int, text string, attachmentIDs []int, reply
 	}
 
 	broadcastEvent(chatID, "message", map[string]interface{}{"message": msg})
+	// Recipients with a live socket count as delivered immediately.
+	markDeliveredToOnline(chatID, msg.ID, senderID)
 	return msg, nil
 }
 
@@ -228,6 +234,7 @@ func loadMessageByID(id int) (models.Message, error) {
 		msg.EditedAt = &t
 	}
 	msg.Attachments = loadAttachmentsByMessage(id)
+	msg.Reactions = loadReactionsByMessage(id)
 	return msg, nil
 }
 

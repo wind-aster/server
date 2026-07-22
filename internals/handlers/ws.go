@@ -18,11 +18,64 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin:     func(r *http.Request) bool { return true },
 }
 
-// Хранилище активных сокетов: мапим UserID -> Соединение
+// wsClient wraps a single socket. gorilla/websocket forbids concurrent writers,
+// so every write goes through writeMu.
+type wsClient struct {
+	conn    *websocket.Conn
+	writeMu sync.Mutex
+}
+
+func (c *wsClient) write(payload []byte) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if err := c.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+		log.Printf("ws: ошибка записи: %v", err)
+	}
+}
+
+// clients maps a userID to the set of their live connections (one per tab).
 var (
-	clients      = make(map[int]*websocket.Conn)
+	clients      = make(map[int]map[*wsClient]bool)
 	clientsMutex sync.RWMutex
 )
+
+// addClient registers a connection, reporting whether it's the user's first
+// (i.e. they just came online).
+func addClient(userID int, c *wsClient) bool {
+	clientsMutex.Lock()
+	defer clientsMutex.Unlock()
+	set := clients[userID]
+	if set == nil {
+		set = make(map[*wsClient]bool)
+		clients[userID] = set
+	}
+	first := len(set) == 0
+	set[c] = true
+	return first
+}
+
+// removeClient unregisters a connection, reporting whether it was the user's
+// last (i.e. they just went offline).
+func removeClient(userID int, c *wsClient) bool {
+	clientsMutex.Lock()
+	defer clientsMutex.Unlock()
+	set := clients[userID]
+	if set == nil {
+		return false
+	}
+	delete(set, c)
+	if len(set) == 0 {
+		delete(clients, userID)
+		return true
+	}
+	return false
+}
+
+func isOnline(userID int) bool {
+	clientsMutex.RLock()
+	defer clientsMutex.RUnlock()
+	return len(clients[userID]) > 0
+}
 
 // WsHandler обрабатывает постоянное подключение пользователя
 func WsHandler(w http.ResponseWriter, r *http.Request) {
@@ -40,17 +93,24 @@ func WsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Регистрируем клиента в нашей карте онлайна
-	clientsMutex.Lock()
-	clients[userID] = conn
-	clientsMutex.Unlock()
+	client := &wsClient{conn: conn}
+	if addClient(userID, client) {
+		// First live connection — the user just came online.
+		announcePresence(userID, true)
+	}
 	log.Printf("Пользователь %d подключился по WebSocket", userID)
+
+	// Now that this user is online, any messages sent while they were offline
+	// count as delivered — advance their delivered pointer across all chats.
+	markDeliveredAllChats(userID)
 
 	// Гарантируем очистку при отключении
 	defer func() {
-		clientsMutex.Lock()
-		delete(clients, userID)
-		clientsMutex.Unlock()
+		if removeClient(userID, client) {
+			// Last connection closed — the user went offline.
+			touchLastSeen(userID)
+			announcePresence(userID, false)
+		}
 		conn.Close()
 		log.Printf("Пользователь %d отключился", userID)
 	}()
@@ -65,14 +125,26 @@ func WsHandler(w http.ResponseWriter, r *http.Request) {
 
 		// Парсим входящий JSON
 		var incoming struct {
+			Type          string `json:"type"`
 			ChatID        int    `json:"chat_id"`
 			Text          string `json:"text"`
 			AttachmentIDs []int  `json:"attachment_ids"`
 			ReplyToID     *int   `json:"reply_to_id"`
+			Typing        bool   `json:"typing"`
 		}
 
 		if err := json.Unmarshal(payload, &incoming); err != nil {
 			log.Printf("Не удалось распарсить JSON от юзера %d: %v", userID, err)
+			continue
+		}
+
+		// Ephemeral typing signal — fan out to the chat, don't persist.
+		if incoming.Type == "typing" {
+			broadcastEvent(incoming.ChatID, "typing", map[string]interface{}{
+				"chat_id": incoming.ChatID,
+				"user_id": userID,
+				"typing":  incoming.Typing,
+			})
 			continue
 		}
 
@@ -90,7 +162,7 @@ func WsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// broadcastToChat sends payload to every currently-online member of chatID.
+// broadcastToChat sends payload to every live connection of every chat member.
 func broadcastToChat(chatID int, payload []byte) {
 	rows, err := database.DB.Query(`SELECT user_id FROM chat_members WHERE chat_id = $1`, chatID)
 	if err != nil {
@@ -106,13 +178,50 @@ func broadcastToChat(chatID int, payload []byte) {
 	}
 	rows.Close()
 
+	broadcastToUsers(memberIDs, payload)
+}
+
+// broadcastToUsers sends payload to every live connection of the given users.
+// Targets are collected under the lock, then written without holding it (so a
+// slow socket can't block the map).
+func broadcastToUsers(userIDs []int, payload []byte) {
 	clientsMutex.RLock()
-	defer clientsMutex.RUnlock()
+	var targets []*wsClient
+	for _, uid := range userIDs {
+		for c := range clients[uid] {
+			targets = append(targets, c)
+		}
+	}
+	clientsMutex.RUnlock()
+
+	for _, c := range targets {
+		c.write(payload)
+	}
+}
+
+// markDeliveredToOnline marks every currently-online chat member (except the
+// sender) as delivered up to msgID, so a just-sent message reflects delivery to
+// recipients who have a live socket.
+func markDeliveredToOnline(chatID, msgID, senderID int) {
+	rows, err := database.DB.Query(`SELECT user_id FROM chat_members WHERE chat_id = $1`, chatID)
+	if err != nil {
+		return
+	}
+	var memberIDs []int
+	for rows.Next() {
+		var mID int
+		if err := rows.Scan(&mID); err == nil {
+			memberIDs = append(memberIDs, mID)
+		}
+	}
+	rows.Close()
+
 	for _, mID := range memberIDs {
-		if conn, online := clients[mID]; online {
-			if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
-				log.Printf("broadcast: ошибка отправки пользователю %d: %v", mID, err)
-			}
+		if mID == senderID {
+			continue
+		}
+		if isOnline(mID) {
+			markDelivered(chatID, mID, msgID)
 		}
 	}
 }

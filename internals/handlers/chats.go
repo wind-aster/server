@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -37,9 +38,9 @@ func GetChatsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Fetch members
+		// Fetch members (+ presence: online from live sockets, last_seen from DB).
 		memberRows, err := database.DB.Query(`
-			SELECT u.id, u.username, u.display_name, u.email
+			SELECT u.id, u.username, u.display_name, u.email, u.last_seen_at
 			FROM users u
 			JOIN chat_members cm ON cm.user_id = u.id
 			WHERE cm.chat_id = $1`, c.ID)
@@ -49,11 +50,17 @@ func GetChatsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		for memberRows.Next() {
 			var u models.User
-			if err := memberRows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Email); err != nil {
+			var lastSeen sql.NullTime
+			if err := memberRows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Email, &lastSeen); err != nil {
 				memberRows.Close()
 				http.Error(w, "Ошибка чтения участника: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
+			if lastSeen.Valid {
+				t := lastSeen.Time
+				u.LastSeen = &t
+			}
+			u.Online = isOnline(u.ID)
 			c.Members = append(c.Members, u)
 		}
 		memberRows.Close()
@@ -74,6 +81,43 @@ func GetChatsHandler(w http.ResponseWriter, r *http.Request) {
 
 		if c.Members == nil {
 			c.Members = []models.User{}
+		}
+
+		// Read/delivered pointers for every member (drives receipts).
+		statusRows, err := database.DB.Query(`
+			SELECT user_id, last_read_message_id, last_delivered_message_id
+			FROM chat_members WHERE chat_id = $1`, c.ID)
+		if err != nil {
+			http.Error(w, "Ошибка получения статусов чата: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		var myLastRead int
+		for statusRows.Next() {
+			var ms models.MemberStatus
+			if err := statusRows.Scan(&ms.UserID, &ms.LastRead, &ms.LastDelivered); err != nil {
+				statusRows.Close()
+				http.Error(w, "Ошибка чтения статуса: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if ms.UserID == userID {
+				myLastRead = ms.LastRead
+			}
+			c.MemberStatus = append(c.MemberStatus, ms)
+		}
+		statusRows.Close()
+
+		// Unread = messages newer than my read pointer, excluding my own + system.
+		if err := database.DB.QueryRow(`
+			SELECT COUNT(*) FROM messages
+			WHERE chat_id = $1 AND id > $2 AND sender_id <> $3 AND sender_id <> 0 AND deleted_at IS NULL`,
+			c.ID, myLastRead, userID,
+		).Scan(&c.UnreadCount); err != nil {
+			http.Error(w, "Ошибка подсчёта непрочитанных: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		if c.MemberStatus == nil {
+			c.MemberStatus = []models.MemberStatus{}
 		}
 
 		chats = append(chats, c)

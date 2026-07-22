@@ -63,7 +63,7 @@ func GetChatsHandler(w http.ResponseWriter, r *http.Request) {
 		err = database.DB.QueryRow(`
 			SELECT id, sender_id, chat_id, text, created_at
 			FROM messages
-			WHERE chat_id = $1
+			WHERE chat_id = $1 AND deleted_at IS NULL
 			ORDER BY created_at DESC
 			LIMIT 1`, c.ID).Scan(&lastMsg.ID, &lastMsg.SenderID, &lastMsg.ChatID, &lastMsg.Text, &lastMsg.CreatedAt)
 		if err == nil {

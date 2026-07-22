@@ -74,6 +74,8 @@ func main() {
 
 		r.Post("/api/messages", handlers.SendMessageHandler)
 		r.Get("/api/messages", handlers.GetMessagesHandler)
+		r.Patch("/api/messages/{id}", handlers.EditMessageHandler)
+		r.Delete("/api/messages/{id}", handlers.DeleteMessageHandler)
 
 		r.Post("/api/uploads", handlers.CreateUploadHandler)
 		r.Get("/api/files/{id}", handlers.GetFileHandler)

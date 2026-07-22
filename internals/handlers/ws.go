@@ -68,6 +68,7 @@ func WsHandler(w http.ResponseWriter, r *http.Request) {
 			ChatID        int    `json:"chat_id"`
 			Text          string `json:"text"`
 			AttachmentIDs []int  `json:"attachment_ids"`
+			ReplyToID     *int   `json:"reply_to_id"`
 		}
 
 		if err := json.Unmarshal(payload, &incoming); err != nil {
@@ -80,66 +81,53 @@ func WsHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// 1. Сохраняем сообщение в базу данных, чтобы получить ID и дату создания
-		query := `INSERT INTO messages (sender_id, chat_id, text) VALUES ($1, $2, $3) RETURNING id, created_at`
-		var msgID int
-		var createdAt string
-
-		err = database.DB.QueryRow(query, userID, incoming.ChatID, incoming.Text).Scan(&msgID, &createdAt)
-		if err != nil {
+		// Persist + broadcast (the sender is a chat member, so the fanout below
+		// delivers the message back to them as well).
+		if _, err := createMessage(userID, incoming.ChatID, incoming.Text, incoming.AttachmentIDs, incoming.ReplyToID); err != nil {
 			log.Printf("Ошибка сохранения WS-сообщения в базу: %v", err)
 			continue
 		}
-
-		// Link any uploaded attachments to this message before broadcasting.
-		finalizeAttachments(msgID, incoming.ChatID, userID, incoming.AttachmentIDs)
-
-		// Формируем полноценный объект сообщения для отправки
-		fullMessage := map[string]interface{}{
-			"id":         msgID,
-			"sender_id":  userID,
-			"chat_id":    incoming.ChatID,
-			"text":       incoming.Text,
-			"created_at": createdAt,
-		}
-		if att := loadAttachmentsByMessage(msgID); len(att) > 0 {
-			fullMessage["attachments"] = att
-		}
-
-		finalJSON, _ := json.Marshal(fullMessage)
-
-		// 2. Получаем из базы список ID всех участников этого чата
-		memberQuery := `SELECT user_id FROM chat_members WHERE chat_id = $1`
-		rows, err := database.DB.Query(memberQuery, incoming.ChatID)
-		if err != nil {
-			log.Printf("Ошибка получения участников чата %d: %v", incoming.ChatID, err)
-			continue
-		}
-
-		var memberIDs []int
-		for rows.Next() {
-			var mID int
-			if err := rows.Scan(&mID); err == nil {
-				memberIDs = append(memberIDs, mID)
-			}
-		}
-		rows.Close()
-
-		// 3. Рассылаем сообщение всем участникам чата, кто сейчас в онлайне
-		clientsMutex.RLock()
-		for _, mID := range memberIDs {
-			// Если мы хотим, чтобы отправитель тоже получил это сообщение в общем потоке,
-			// оставляем его. Если нет — можно поставить условие: if mID == userID { continue }
-			if rConn, online := clients[mID]; online {
-				err = rConn.WriteMessage(websocket.TextMessage, finalJSON)
-				if err != nil {
-					log.Printf("Ошибка отправки сообщения пользователю %d: %v", mID, err)
-				}
-			}
-		}
-		clientsMutex.RUnlock()
-
-		// Старый «Шаг 3» (отправку дубликата отправителю) мы просто удаляем,
-		// так как цикл выше и так отправит ему сообщение, если он состоит в этом чате.
 	}
+}
+
+// broadcastToChat sends payload to every currently-online member of chatID.
+func broadcastToChat(chatID int, payload []byte) {
+	rows, err := database.DB.Query(`SELECT user_id FROM chat_members WHERE chat_id = $1`, chatID)
+	if err != nil {
+		log.Printf("broadcast: не удалось получить участников чата %d: %v", chatID, err)
+		return
+	}
+	var memberIDs []int
+	for rows.Next() {
+		var mID int
+		if err := rows.Scan(&mID); err == nil {
+			memberIDs = append(memberIDs, mID)
+		}
+	}
+	rows.Close()
+
+	clientsMutex.RLock()
+	defer clientsMutex.RUnlock()
+	for _, mID := range memberIDs {
+		if conn, online := clients[mID]; online {
+			if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+				log.Printf("broadcast: ошибка отправки пользователю %d: %v", mID, err)
+			}
+		}
+	}
+}
+
+// broadcastEvent marshals a typed envelope {"type": eventType, ...fields} and
+// fans it out to a chat. This is the single shape all realtime events use.
+func broadcastEvent(chatID int, eventType string, fields map[string]interface{}) {
+	env := map[string]interface{}{"type": eventType}
+	for k, v := range fields {
+		env[k] = v
+	}
+	payload, err := json.Marshal(env)
+	if err != nil {
+		log.Printf("broadcast: не удалось сериализовать событие %q: %v", eventType, err)
+		return
+	}
+	broadcastToChat(chatID, payload)
 }

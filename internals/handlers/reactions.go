@@ -108,10 +108,13 @@ func ToggleReactionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var chatID int
+	var (
+		chatID   int
+		senderID int
+	)
 	if err := database.DB.QueryRow(
-		`SELECT chat_id FROM messages WHERE id = $1 AND deleted_at IS NULL`, id,
-	).Scan(&chatID); err != nil {
+		`SELECT chat_id, sender_id FROM messages WHERE id = $1 AND deleted_at IS NULL`, id,
+	).Scan(&chatID, &senderID); err != nil {
 		http.Error(w, "Сообщение не найдено", http.StatusNotFound)
 		return
 	}
@@ -129,7 +132,11 @@ func ToggleReactionHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Ошибка обновления реакции: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// added is true when we inserted (nothing was deleted) — used by the client
+	// to decide whether to notify the message author.
+	added := false
 	if n, _ := res.RowsAffected(); n == 0 {
+		added = true
 		if _, err := database.DB.Exec(
 			`INSERT INTO message_reactions (message_id, user_id, emoji) VALUES ($1, $2, $3)
 			 ON CONFLICT DO NOTHING`,
@@ -145,6 +152,10 @@ func ToggleReactionHandler(w http.ResponseWriter, r *http.Request) {
 		"chat_id":    chatID,
 		"message_id": id,
 		"reactions":  reactions,
+		"sender_id":  senderID,
+		"actor_id":   userID,
+		"added":      added,
+		"emoji":      input.Emoji,
 	})
 
 	w.Header().Set("Content-Type", "application/json")

@@ -19,11 +19,20 @@ import (
 )
 
 func main() {
-	fmt.Println("Запуск сервера WindAster...")
-
 	godotenv.Load()
 
 	cfg := config.Load()
+
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		if err := database.MigrateUp(cfg.DBDSN); err != nil {
+			log.Fatalf("migrate: %v", err)
+		}
+		log.Println("migrations applied")
+		return
+	}
+
+	fmt.Println("Запуск сервера WindAster...")
+
 	if cfg.DBDSN == "" {
 		fmt.Println("Ошибка: DB_DSN не задан")
 		os.Exit(1)
@@ -45,6 +54,7 @@ func main() {
 	handlers.Store = store
 	handlers.MaxUploadSize = cfg.MaxUploadSize
 	handlers.MaxVideoSize = cfg.MaxVideoSize
+	handlers.MediaURLExpiry = cfg.MediaURLExpiry
 
 	// Periodically clean up abandoned (never-sent) uploads from DB + storage.
 	handlers.StartAttachmentCleanup(time.Hour, cfg.PendingAttachmentTTL)

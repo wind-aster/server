@@ -32,8 +32,9 @@ type ReplyPreview struct {
 	Text       string `json:"text"`
 }
 
-// Attachment is a file linked to a message. URL/ThumbURL are short-lived
-// presigned GET links generated per response; they are never persisted.
+// Attachment is a file linked to a message. URL/ThumbURL are presigned GET links
+// cached on the row (see attachments.url_cached) and reused across responses
+// until near expiry, so the browser can cache the bytes instead of re-fetching.
 type Attachment struct {
 	ID        int    `json:"id"`
 	Filename  string `json:"filename"`

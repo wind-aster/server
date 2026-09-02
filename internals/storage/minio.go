@@ -16,8 +16,13 @@ import (
 //
 // Two clients are kept: `internal` talks to MinIO from the server (Stat/Delete/
 // bucket setup), while `public` is used only to *sign* browser-facing URLs so
-// the host in the signature matches what the browser actually connects to. The
-// public client never makes network calls here (presigning is a local HMAC).
+// the host in the signature matches what the browser actually connects to.
+//
+// Both clients have their signing Region pinned. This is critical for the public
+// client: without a region, minio-go issues a GetBucketLocation network call on
+// its first presign — against the public (browser-facing) host, which the server
+// may not be able to reach. With the region set, presigning is a purely local
+// HMAC and never depends on the public endpoint being reachable.
 type minioStorage struct {
 	internal *minio.Client
 	public   *minio.Client
@@ -32,11 +37,11 @@ func NewMinio(cfg config.Config) (Storage, error) {
 
 	creds := credentials.NewStaticV4(cfg.MinioAccessKey, cfg.MinioSecretKey, "")
 
-	internal, err := minio.New(intHost, &minio.Options{Creds: creds, Secure: intSecure})
+	internal, err := minio.New(intHost, &minio.Options{Creds: creds, Secure: intSecure, Region: cfg.MinioRegion})
 	if err != nil {
 		return nil, fmt.Errorf("minio internal client: %w", err)
 	}
-	public, err := minio.New(pubHost, &minio.Options{Creds: creds, Secure: pubSecure})
+	public, err := minio.New(pubHost, &minio.Options{Creds: creds, Secure: pubSecure, Region: cfg.MinioRegion})
 	if err != nil {
 		return nil, fmt.Errorf("minio public client: %w", err)
 	}
@@ -70,7 +75,7 @@ func (s *minioStorage) PresignPut(ctx context.Context, key string) (string, erro
 	return u.String(), nil
 }
 
-func (s *minioStorage) PresignGet(ctx context.Context, key, downloadName string, inline bool) (string, error) {
+func (s *minioStorage) PresignGet(ctx context.Context, key, downloadName string, inline bool, expiry time.Duration) (string, error) {
 	reqParams := make(url.Values)
 	if inline {
 		reqParams.Set("response-content-disposition", "inline")
@@ -78,7 +83,12 @@ func (s *minioStorage) PresignGet(ctx context.Context, key, downloadName string,
 		reqParams.Set("response-content-disposition",
 			fmt.Sprintf("attachment; filename=%q", downloadName))
 	}
-	u, err := s.public.PresignedGetObject(ctx, s.bucket, key, s.expiry, reqParams)
+	// Objects are content-unique (UUID keys, never overwritten), so the bytes are
+	// immutable — let the browser cache them for the URL's lifetime. This is a
+	// signed query param, so it's part of the signature and stays stable.
+	reqParams.Set("response-cache-control",
+		fmt.Sprintf("private, max-age=%d, immutable", int(expiry.Seconds())))
+	u, err := s.public.PresignedGetObject(ctx, s.bucket, key, expiry, reqParams)
 	if err != nil {
 		return "", err
 	}

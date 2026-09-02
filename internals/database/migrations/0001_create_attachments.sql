@@ -1,6 +1,8 @@
 -- Attachments for chat messages.
 -- No migration tool is wired up (createTables() in internals/database is
 -- disabled); apply manually:  psql "$DB_DSN" -f migrations/0001_create_attachments.sql
+
+-- +goose Up
 CREATE TABLE IF NOT EXISTS attachments (
     id          SERIAL PRIMARY KEY,
     message_id  INTEGER REFERENCES messages(id) ON DELETE CASCADE, -- NULL until the message is sent
@@ -19,3 +21,7 @@ CREATE TABLE IF NOT EXISTS attachments (
 
 CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments (message_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_chat ON attachments (chat_id);
+
+
+-- +goose Down
+DROP TABLE attachments;

@@ -15,11 +15,13 @@ type Config struct {
 	MinioAccessKey      string
 	MinioSecretKey      string
 	MinioBucket         string
+	MinioRegion         string // signing region; pinned so presigning never does a GetBucketLocation call
 	MinioUseSSL         bool
 
 	MaxUploadSize   int64         // bytes, general files
 	MaxVideoSize    int64         // bytes, videos (larger cap)
-	UploadURLExpiry time.Duration // presigned URL lifetime
+	UploadURLExpiry time.Duration // presigned PUT (upload) URL lifetime — kept short
+	MediaURLExpiry  time.Duration // presigned GET (download) URL lifetime — long, for caching
 
 	PendingAttachmentTTL time.Duration // abandoned pending uploads older than this are cleaned up
 
@@ -39,10 +41,12 @@ func Load() Config {
 		MinioAccessKey:       os.Getenv("MINIO_ACCESS_KEY"),
 		MinioSecretKey:       os.Getenv("MINIO_SECRET_KEY"),
 		MinioBucket:          getEnv("MINIO_BUCKET", "windaster-files"),
+		MinioRegion:          getEnv("MINIO_REGION", "us-east-1"),
 		MinioUseSSL:          getEnv("MINIO_USE_SSL", "false") == "true",
 		MaxUploadSize:        getInt64("MAX_UPLOAD_SIZE", 26214400), // 25 MiB
 		MaxVideoSize:         getInt64("MAX_VIDEO_SIZE", 52428800),  // 50 MiB
 		UploadURLExpiry:      time.Duration(getInt64("UPLOAD_URL_EXPIRY_SECONDS", 900)) * time.Second,
+		MediaURLExpiry:       time.Duration(getInt64("MEDIA_URL_EXPIRY_SECONDS", 604800)) * time.Second, // 7d (S3 v4 max)
 		PendingAttachmentTTL: time.Duration(getInt64("PENDING_ATTACHMENT_TTL_HOURS", 24)) * time.Hour,
 		JWTSecret:            os.Getenv("JWT_SECRET"),
 		AccessTokenTTL:       time.Duration(getInt64("ACCESS_TOKEN_TTL_MINUTES", 15)) * time.Minute,

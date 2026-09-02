@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/WindAster/server/internals/database"
 	"github.com/WindAster/server/internals/middleware"
@@ -21,10 +22,16 @@ import (
 
 // Wired from main() at startup, mirroring how database.DB is shared.
 var (
-	Store         storage.Storage
-	MaxUploadSize int64
-	MaxVideoSize  int64
+	Store          storage.Storage
+	MaxUploadSize  int64
+	MaxVideoSize   int64
+	MediaURLExpiry time.Duration
 )
+
+// mediaURLRegenBuffer is how long before a cached presigned URL expires we
+// proactively regenerate it, so a URL handed to a client is always valid for at
+// least this long afterwards.
+const mediaURLRegenBuffer = 24 * time.Hour
 
 // limitFor returns the max allowed byte size for a given mime type. Videos get
 // their own (larger) cap; everything else uses the general upload limit.
@@ -145,19 +152,24 @@ func GetFileHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		chatID     int
-		filename   string
-		mimeType   string
-		sizeBytes  int64
-		width      sql.NullInt64
-		height     sql.NullInt64
-		storageKey string
-		thumbKey   sql.NullString
+		chatID      int
+		filename    string
+		mimeType    string
+		sizeBytes   int64
+		width       sql.NullInt64
+		height      sql.NullInt64
+		storageKey  string
+		thumbKey    sql.NullString
+		cachedURL   sql.NullString
+		cachedThumb sql.NullString
+		expiresAt   sql.NullTime
 	)
 	err = database.DB.QueryRow(
-		`SELECT chat_id, filename, mime_type, size_bytes, width, height, storage_key, thumb_key
+		`SELECT chat_id, filename, mime_type, size_bytes, width, height,
+		        storage_key, thumb_key, url_cached, thumb_url_cached, url_expires_at
 		 FROM attachments WHERE id = $1 AND status = 'ready'`, id,
-	).Scan(&chatID, &filename, &mimeType, &sizeBytes, &width, &height, &storageKey, &thumbKey)
+	).Scan(&chatID, &filename, &mimeType, &sizeBytes, &width, &height,
+		&storageKey, &thumbKey, &cachedURL, &cachedThumb, &expiresAt)
 	if err == sql.ErrNoRows {
 		http.Error(w, "Вложение не найдено", http.StatusNotFound)
 		return
@@ -179,15 +191,8 @@ func GetFileHandler(w http.ResponseWriter, r *http.Request) {
 		hv := int(height.Int64)
 		a.Height = &hv
 	}
-	ctx := r.Context()
-	if u, err := Store.PresignGet(ctx, storageKey, filename, isInlineType(mimeType)); err == nil {
-		a.URL = u
-	}
-	if thumbKey.Valid && thumbKey.String != "" {
-		if u, err := Store.PresignGet(ctx, thumbKey.String, filename, true); err == nil {
-			a.ThumbURL = u
-		}
-	}
+	a.URL, a.ThumbURL = cachedMediaURLs(
+		id, storageKey, filename, mimeType, thumbKey, cachedURL, cachedThumb, expiresAt)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(a)
@@ -264,6 +269,50 @@ func loadAttachmentsByIDs(ids []int) map[int][]models.Attachment {
 	return loadAttachments(where, args...)
 }
 
+// cachedMediaURLs returns the browser-facing GET URLs (main + thumbnail) for an
+// attachment, reusing the persisted presigned URLs when they're still valid and
+// regenerating (and persisting) them otherwise. Because the same URL string is
+// reused across requests, the browser can cache the bytes instead of re-fetching
+// from storage on every chat open.
+func cachedMediaURLs(
+	id int,
+	storageKey, filename, mime string,
+	thumbKey, cachedURL, cachedThumb sql.NullString,
+	expiresAt sql.NullTime,
+) (url, thumb string) {
+	// Reuse the cached URLs while they're comfortably far from expiry. Require a
+	// non-empty main URL so a previously-poisoned empty row (e.g. from a presign
+	// failure) is treated as a miss and self-heals here.
+	if expiresAt.Valid && cachedURL.String != "" && time.Until(expiresAt.Time) > mediaURLRegenBuffer {
+		return cachedURL.String, cachedThumb.String
+	}
+
+	ctx := context.Background()
+	if u, err := Store.PresignGet(ctx, storageKey, filename, isInlineType(mime), MediaURLExpiry); err == nil {
+		url = u
+	} else {
+		log.Printf("cachedMediaURLs: presign failed for attachment %d (key %s): %v", id, storageKey, err)
+	}
+	if thumbKey.Valid && thumbKey.String != "" {
+		if u, err := Store.PresignGet(ctx, thumbKey.String, filename, true, MediaURLExpiry); err == nil {
+			thumb = u
+		} else {
+			log.Printf("cachedMediaURLs: thumb presign failed for attachment %d: %v", id, err)
+		}
+	}
+
+	// Only persist a real URL — never cache an empty string (which would otherwise
+	// be served until expiry). On presign failure, return without writing so the
+	// next load retries. Best-effort UPDATE: a failure just means we regenerate.
+	if url != "" {
+		_, _ = database.DB.Exec(
+			`UPDATE attachments SET url_cached = $1, thumb_url_cached = NULLIF($2, ''), url_expires_at = $3 WHERE id = $4`,
+			url, thumb, time.Now().Add(MediaURLExpiry), id,
+		)
+	}
+	return url, thumb
+}
+
 // loadAttachments runs the shared query (filtered by the given WHERE fragment)
 // and builds a message_id -> attachments map with presigned URLs.
 func loadAttachments(where string, args ...interface{}) map[int][]models.Attachment {
@@ -272,7 +321,8 @@ func loadAttachments(where string, args ...interface{}) map[int][]models.Attachm
 		return result
 	}
 	rows, err := database.DB.Query(
-		`SELECT id, message_id, filename, mime_type, size_bytes, width, height, storage_key, thumb_key
+		`SELECT id, message_id, filename, mime_type, size_bytes, width, height,
+		        storage_key, thumb_key, url_cached, thumb_url_cached, url_expires_at
 		 FROM attachments
 		 WHERE `+where+` AND status = 'ready' AND message_id IS NOT NULL
 		 ORDER BY id ASC`, args...)
@@ -282,18 +332,20 @@ func loadAttachments(where string, args ...interface{}) map[int][]models.Attachm
 	}
 	defer rows.Close()
 
-	ctx := context.Background()
 	for rows.Next() {
 		var (
-			a          models.Attachment
-			msgID      int
-			width      sql.NullInt64
-			height     sql.NullInt64
-			storageKey string
-			thumbKey   sql.NullString
+			a           models.Attachment
+			msgID       int
+			width       sql.NullInt64
+			height      sql.NullInt64
+			storageKey  string
+			thumbKey    sql.NullString
+			cachedURL   sql.NullString
+			cachedThumb sql.NullString
+			expiresAt   sql.NullTime
 		)
 		if err := rows.Scan(&a.ID, &msgID, &a.Filename, &a.MimeType, &a.SizeBytes,
-			&width, &height, &storageKey, &thumbKey); err != nil {
+			&width, &height, &storageKey, &thumbKey, &cachedURL, &cachedThumb, &expiresAt); err != nil {
 			log.Printf("loadAttachments: scan failed: %v", err)
 			continue
 		}
@@ -305,14 +357,8 @@ func loadAttachments(where string, args ...interface{}) map[int][]models.Attachm
 			hv := int(height.Int64)
 			a.Height = &hv
 		}
-		if u, err := Store.PresignGet(ctx, storageKey, a.Filename, isInlineType(a.MimeType)); err == nil {
-			a.URL = u
-		}
-		if thumbKey.Valid && thumbKey.String != "" {
-			if u, err := Store.PresignGet(ctx, thumbKey.String, a.Filename, true); err == nil {
-				a.ThumbURL = u
-			}
-		}
+		a.URL, a.ThumbURL = cachedMediaURLs(
+			a.ID, storageKey, a.Filename, a.MimeType, thumbKey, cachedURL, cachedThumb, expiresAt)
 		result[msgID] = append(result[msgID], a)
 	}
 	return result
